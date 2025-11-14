@@ -1,0 +1,253 @@
+---
+- name: Install/Update ComfyUI natively on DGX Spark (Multi-User)
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Create comfyui-users group for multi-user access
+      group:
+        name: "{{ comfyui_group }}"
+        state: present
+
+    - name: Add sudo users to comfyui-users group
+      user:
+        name: "{{ item }}"
+        groups: "{{ comfyui_group }}"
+        append: yes
+      loop: "{{ comfyui_users }}"
+      when: comfyui_users | length > 0
+
+    - name: Ensure ComfyUI install directory exists
+      file:
+        path: "{{ comfyui_install_dir }}"
+        state: directory
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: "{{ comfyui_permissions }}"
+
+    - name: Install system dependencies
+      apt:
+        name:
+          - python3.12
+          - python3.12-venv
+          - python3.12-dev
+          - git
+          - build-essential
+          - libgl1
+          - libglib2.0-0
+        state: present
+        update_cache: yes
+
+    - name: Check if ComfyUI is already cloned
+      stat:
+        path: "{{ comfyui_app_dir }}"
+      register: comfyui_dir
+
+    - name: Clone ComfyUI repository
+      git:
+        repo: "{{ comfyui_repo_url }}"
+        dest: "{{ comfyui_app_dir }}"
+        version: "{{ comfyui_branch }}"
+        force: no
+      when: not comfyui_dir.stat.exists
+
+    - name: Update ComfyUI repository
+      git:
+        repo: "{{ comfyui_repo_url }}"
+        dest: "{{ comfyui_app_dir }}"
+        version: "{{ comfyui_branch }}"
+        update: yes
+        force: yes
+      when: comfyui_dir.stat.exists
+
+    - name: Set ComfyUI directory permissions for multi-user
+      file:
+        path: "{{ comfyui_app_dir }}"
+        state: directory
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: "{{ comfyui_permissions }}"
+        recurse: yes
+
+    - name: Create Python virtual environment
+      command: python3.12 -m venv {{ venv_path }}
+      args:
+        creates: "{{ venv_path }}/bin/python"
+
+    - name: Upgrade pip in venv
+      pip:
+        name: pip
+        state: latest
+        virtualenv: "{{ venv_path }}"
+
+    - name: Install additional Python packages (python-dotenv, psutil, onnxruntime)
+      pip:
+        name:
+          - python-dotenv
+          - psutil
+          - onnxruntime
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Install PyTorch with CUDA 13.0 support
+      pip:
+        name: "torch=={{ pytorch_version }}"
+        extra_args: "--index-url {{ pytorch_index_url }}"
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Install torchvision with CUDA 13.0 support
+      pip:
+        name: torchvision
+        extra_args: "--index-url {{ pytorch_index_url }}"
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Install torchaudio with CUDA 13.0 support
+      pip:
+        name: torchaudio
+        extra_args: "--index-url {{ pytorch_index_url }}"
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Pin PyTorch versions to prevent downgrade
+      shell: |
+        . {{ venv_path }}/bin/activate
+        pip freeze | grep -E '^torch==' > {{ comfyui_install_dir }}/pytorch_pins.txt
+        pip freeze | grep -E '^torchvision==' >> {{ comfyui_install_dir }}/pytorch_pins.txt
+        pip freeze | grep -E '^torchaudio==' >> {{ comfyui_install_dir }}/pytorch_pins.txt
+        pip freeze | grep -E '^triton==' >> {{ comfyui_install_dir }}/pytorch_pins.txt
+        pip freeze | grep -E '^nvidia-' >> {{ comfyui_install_dir }}/pytorch_pins.txt
+      args:
+        creates: "{{ comfyui_install_dir }}/pytorch_pins.txt"
+        executable: /bin/bash
+
+    - name: Install ComfyUI requirements (excluding torch packages)
+      shell: |
+        . {{ venv_path }}/bin/activate
+        grep -v -E '^torch|^torchvision|^torchaudio|^triton|^nvidia-' {{ comfyui_app_dir }}/requirements.txt | pip install -r /dev/stdin
+      args:
+        executable: /bin/bash
+
+    - name: Reinstall pinned PyTorch packages to ensure correct versions
+      pip:
+        requirements: "{{ comfyui_install_dir }}/pytorch_pins.txt"
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Install additional optimizations
+      pip:
+        name:
+          - xformers
+          - triton
+          - torchsde
+          - torchao
+        state: latest
+        virtualenv: "{{ venv_path }}"
+      environment: "{{ comfyui_env_vars }}"
+      ignore_errors: yes
+
+    - name: Install flash-attention for optimal performance
+      shell: |
+        . {{ venv_path }}/bin/activate
+        {% for key, value in comfyui_env_vars.items() %}
+        export {{ key }}={{ value }}
+        {% endfor %}
+        pip install flash-attn --no-build-isolation || echo "flash-attn install failed, continuing..."
+      args:
+        executable: /bin/bash
+      ignore_errors: yes
+
+    - name: Check if sageattention is already installed
+      shell: |
+        source {{ venv_path }}/bin/activate
+        python -c "import sageattention; print(sageattention.__version__)" 2>/dev/null || echo "NOT_INSTALLED"
+      args:
+        executable: /bin/bash
+      register: sageattention_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install sageattention for GPU architecture {{ cuda_arch_list }} (REQUIRED - NOT OPTIONAL)
+      shell: |
+        set -e
+        source {{ venv_path }}/bin/activate
+        {% for key, value in comfyui_env_vars.items() %}
+        export {{ key }}="{{ value }}"
+        {% endfor %}
+        export CUDA_HOME="{{ cuda_home }}"
+        export TORCH_CUDA_ARCH_LIST="{{ cuda_arch_list }}"
+        export PATH="{{ venv_path }}/bin:{{ cuda_home }}/bin:/usr/bin:/bin:/usr/local/bin:$PATH"
+        export CC=/usr/bin/gcc
+        export CXX=/usr/bin/g++
+        export AS=/usr/bin/as
+        
+        echo "========================================"
+        echo "Compiling sageattention for sm_{{ cuda_arch_list | replace('.', '') }}"
+        echo "CUDA_HOME: $CUDA_HOME"
+        echo "TORCH_CUDA_ARCH_LIST: $TORCH_CUDA_ARCH_LIST"
+        echo "Using pip from: $(which pip)"
+        echo "Using python from: $(which python)"
+        echo "========================================"
+        
+        MAX_JOBS=1 {{ venv_path }}/bin/pip install {{ sageattention_version | ternary('sageattention==' + sageattention_version, 'sageattention') }} --no-build-isolation
+        
+        echo "========================================"
+        echo "Verifying sageattention installation"
+        echo "========================================"
+        {{ venv_path }}/bin/python -c "import sageattention; print('✓ sageattention successfully imported!')"
+        echo "✓ sageattention successfully installed!"
+      args:
+        executable: /bin/bash
+      when: "'NOT_INSTALLED' in sageattention_check.stdout"
+      register: sageattention_install_result
+
+    - name: Display sageattention status
+      debug:
+        msg: "{{ 'sageattention already installed: ' + sageattention_check.stdout if 'NOT_INSTALLED' not in sageattention_check.stdout else sageattention_install_result.stdout_lines }}"
+
+    - name: Set venv permissions for multi-user access
+      file:
+        path: "{{ venv_path }}"
+        state: directory
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: "{{ comfyui_permissions }}"
+        recurse: yes
+
+    - name: Create ComfyUI launch script
+      copy:
+        dest: "{{ comfyui_install_dir }}/launch.sh"
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: "{{ comfyui_permissions }}"
+        content: |
+          #!/bin/bash
+          cd {{ comfyui_app_dir }}
+          source {{ venv_path }}/bin/activate
+          
+          # Set CUDA device visibility to all GPUs
+          export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr '\n' ',' | sed 's/,$//')
+          
+          # Log GPU detection
+          echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"
+          nvidia-smi --query-gpu=index,name,memory.total --format=csv
+          
+          python main.py --listen 0.0.0.0 --port 8188 "$@"
+
+    - name: Display installation summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Installation/Update Complete!
+          ========================================
+          Installation directory: {{ comfyui_app_dir }}
+          Virtual environment: {{ venv_path }}
+          Launch script: {{ comfyui_install_dir }}/launch.sh
+          Multi-user group: {{ comfyui_group }}
+          
+          To start ComfyUI manually (as root or any user in {{ comfyui_group }}):
+            cd {{ comfyui_install_dir }}
+            ./launch.sh
+          
+          Or install as a systemd service (runs as root) with playbook 02_run_as_service.yml

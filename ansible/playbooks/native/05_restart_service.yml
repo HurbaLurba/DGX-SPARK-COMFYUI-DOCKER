@@ -1,0 +1,39 @@
+---
+- name: Restart ComfyUI service
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Restart ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        state: restarted
+
+    - name: Wait for ComfyUI to start
+      wait_for:
+        port: "{{ service_port }}"
+        delay: 5
+        timeout: 60
+
+    - name: Get service status
+      systemd:
+        name: "{{ service_name }}"
+      register: service_status
+
+    - name: Display service summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Service Restarted!
+          ========================================
+          Service name: {{ service_name }}
+          Status: {{ service_status.status.ActiveState }}
+          Port: {{ service_port }}
+          
+          The service has been restarted successfully.
+          
+          Access ComfyUI at: http://{{ ansible_host }}:{{ service_port }}
+          
+          Service commands:
+            sudo systemctl status {{ service_name }}
+            sudo journalctl -u {{ service_name }} -f

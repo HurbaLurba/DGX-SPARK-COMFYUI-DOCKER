@@ -1,0 +1,81 @@
+---
+- name: Run ComfyUI as systemd service
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Create systemd service file
+      copy:
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        owner: root
+        group: root
+        mode: '0644'
+        content: |
+          [Unit]
+          Description=ComfyUI - Stable Diffusion GUI
+          After=network.target
+
+          [Service]
+          Type=simple
+          User={{ service_user }}
+          Group={{ service_group }}
+          WorkingDirectory={{ comfyui_app_dir }}
+          Environment="PATH={{ venv_path }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          Environment="VIRTUAL_ENV={{ venv_path }}"
+          {% for key, value in comfyui_env_vars.items() %}
+          Environment="{{ key }}={{ value }}"
+          {% endfor %}
+          ExecStartPre=/bin/bash -c 'export CUDA_VISIBLE_DEVICES=$(nvidia-smi --query-gpu=index --format=csv,noheader | tr "\n" "," | sed "s/,$//"); echo "CUDA_VISIBLE_DEVICES: $CUDA_VISIBLE_DEVICES"'
+          ExecStart={{ venv_path }}/bin/python main.py {{ comfyui_flags | join(' ') }}
+          Restart=on-failure
+          RestartSec=10
+          StandardOutput=journal
+          StandardError=journal
+
+          [Install]
+          WantedBy=multi-user.target
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Enable ComfyUI service to start on boot
+      systemd:
+        name: "{{ service_name }}"
+        enabled: yes
+
+    - name: Start ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        state: started
+
+    - name: Wait for ComfyUI to start
+      wait_for:
+        port: 8188
+        delay: 5
+        timeout: 60
+
+    - name: Get service status
+      systemd:
+        name: "{{ service_name }}"
+      register: service_status
+
+    - name: Display service summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Service Started!
+          ========================================
+          Service name: {{ service_name }}
+          Status: {{ service_status.status.ActiveState }}
+          Running as: {{ service_user }}
+          Port: {{ service_port }}
+          
+          Access ComfyUI at: http://{{ ansible_host }}:8188
+          
+          Service commands:
+            sudo systemctl status {{ service_name }}
+            sudo systemctl restart {{ service_name }}
+            sudo journalctl -u {{ service_name }} -f
+          
+          Service is enabled to start automatically on boot.

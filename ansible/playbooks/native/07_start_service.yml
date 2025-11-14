@@ -1,0 +1,46 @@
+---
+- name: Start/Resume ComfyUI service
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Enable ComfyUI service to start on boot
+      systemd:
+        name: "{{ service_name }}"
+        enabled: yes
+
+    - name: Start ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        state: started
+
+    - name: Wait for ComfyUI to start
+      wait_for:
+        port: 8188
+        delay: 5
+        timeout: 60
+
+    - name: Get service status
+      systemd:
+        name: "{{ service_name }}"
+      register: service_status
+
+    - name: Display service summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Service Started!
+          ========================================
+          Service name: {{ service_name }}
+          Status: {{ service_status.status.ActiveState }}
+          Boot start: Enabled
+          Port: 8188
+          
+          Access ComfyUI at: http://{{ ansible_host }}:8188
+          
+          Service commands:
+            sudo systemctl status {{ service_name }}
+            sudo systemctl restart {{ service_name }}
+            sudo journalctl -u {{ service_name }} -f
+          
+          Service is now running and will start automatically on boot.

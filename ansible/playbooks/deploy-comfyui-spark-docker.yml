@@ -1,0 +1,257 @@
+---
+- name: Deploy ComfyUI Docker on DGX Spark
+  hosts: spark_primary
+  become: yes
+  vars:
+    project_dir: "/home/{{ ansible_user }}/comfyui-docker"
+    models_path: "/mnt/comfy_model_share/comfy/models"
+    input_path: "/mnt/comfy_temp_share/ComfyUI/input"
+    output_path: "/mnt/comfy_temp_share/ComfyUI/output"
+    container_name: "comfyui-dgx-spark"
+    port: 8188
+    version: "0.15"
+
+  tasks:
+    - name: Ensure project directory exists
+      file:
+        path: "{{ project_dir }}"
+        state: directory
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy Dockerfile to DGX Spark
+      copy:
+        src: "../../docker/Dockerfile.comfyui-dgx"
+        dest: "{{ project_dir }}/Dockerfile.comfyui-dgx"
+        owner: "{{ ansible_user }}"
+        mode: '0644'
+
+    - name: Copy entrypoint script to DGX Spark
+      copy:
+        src: "../../docker/entrypoint.sh"
+        dest: "{{ project_dir }}/entrypoint.sh"
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Copy build script to DGX Spark
+      copy:
+        src: "../../build-arm64.ps1"
+        dest: "{{ project_dir }}/build-arm64.sh"
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+
+    - name: Create run script for DGX Spark
+      copy:
+        dest: "{{ project_dir }}/run-spark.sh"
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Run script for ComfyUI Docker container on DGX Spark (ARM64)
+          
+          VERSION="{{ version }}"
+          REGISTRY="local"
+          CONTAINER_NAME="{{ container_name }}"
+          PORT="{{ port }}"
+          MODELS_PATH="{{ models_path }}"
+          INPUT_PATH="{{ input_path }}"
+          OUTPUT_PATH="{{ output_path }}"
+          COMFYUI_ARGS="--use-sage-attention --gpu-only --cache-classic --async-offload --cuda-malloc --force-non-blocking --disable-mmap --supports-fp8-compute"
+          
+          echo "=========================================="
+          echo "Running ComfyUI Docker Container"
+          echo "Version: $VERSION"
+          echo "Container Name: $CONTAINER_NAME"
+          echo "Port: $PORT"
+          echo "=========================================="
+          
+          # Set image name
+          IMAGE_NAME="${REGISTRY}/comfyui-dgx:${VERSION}-arm64"
+          
+          # Check if container already exists
+          if [ "$(docker ps -a --filter "name=$CONTAINER_NAME" --format '{{ "{{" }}.Names{{ "}}" }}')" == "$CONTAINER_NAME" ]; then
+              echo "Stopping and removing existing container: $CONTAINER_NAME"
+              docker stop $CONTAINER_NAME 2>/dev/null || true
+              docker rm $CONTAINER_NAME 2>/dev/null || true
+          fi
+          
+          echo "Mounting models path: $MODELS_PATH"
+          echo "Mounting input path: $INPUT_PATH"
+          echo "Mounting output path: $OUTPUT_PATH"
+          echo "ComfyUI arguments: $COMFYUI_ARGS"
+          echo ""
+          
+          # Run the container
+          docker run -d \
+            --name "$CONTAINER_NAME" \
+            --gpus all \
+            -p "${PORT}:8188" \
+            -v "${MODELS_PATH}:/workspace/ComfyUI/models" \
+            -e "MODEL_BASE_PATH=/workspace/ComfyUI/models" \
+            -v "${INPUT_PATH}:/workspace/ComfyUI/input" \
+            -e "INPUT_DIR=/workspace/ComfyUI/input" \
+            -v "${OUTPUT_PATH}:/workspace/ComfyUI/output" \
+            -e "OUTPUT_DIR=/workspace/ComfyUI/output" \
+            -e "COMFYUI_PORT=8188" \
+            -e "COMFYUI_ARGS=$COMFYUI_ARGS" \
+            --restart unless-stopped \
+            "$IMAGE_NAME"
+          
+          if [ $? -eq 0 ]; then
+              echo ""
+              echo "=========================================="
+              echo "Container started successfully!"
+              echo "=========================================="
+              echo "ComfyUI is available at: http://$(hostname -I | awk '{print $1}'):$PORT"
+              echo ""
+              echo "To view logs:"
+              echo "  docker logs -f $CONTAINER_NAME"
+              echo ""
+              echo "To stop the container:"
+              echo "  docker stop $CONTAINER_NAME"
+              echo ""
+              echo "To remove the container:"
+              echo "  docker rm $CONTAINER_NAME"
+          else
+              echo ""
+              echo "=========================================="
+              echo "Failed to start container!"
+              echo "Exit code: $?"
+              echo "=========================================="
+              exit 1
+          fi
+
+    - name: Create build script for DGX Spark
+      copy:
+        dest: "{{ project_dir }}/build.sh"
+        owner: "{{ ansible_user }}"
+        mode: '0755'
+        content: |
+          #!/bin/bash
+          # Build script for ComfyUI Docker image (ARM64)
+          
+          VERSION="{{ version }}"
+          REGISTRY="local"
+          
+          echo "=========================================="
+          echo "Building ComfyUI Docker Image (ARM64)"
+          echo "Version: $VERSION"
+          echo "Registry: $REGISTRY"
+          echo "=========================================="
+          echo "Building image with tags:"
+          echo "  - ${REGISTRY}/comfyui-dgx:${VERSION}-arm64"
+          echo "  - ${REGISTRY}/comfyui-dgx:latest-arm64"
+          echo ""
+          
+          DOCKER_BUILDKIT=1 docker build \
+            --platform linux/arm64 \
+            -f Dockerfile.comfyui-dgx \
+            -t "${REGISTRY}/comfyui-dgx:${VERSION}-arm64" \
+            -t "${REGISTRY}/comfyui-dgx:latest-arm64" \
+            .
+          
+          if [ $? -eq 0 ]; then
+              echo ""
+              echo "=========================================="
+              echo "Build completed successfully!"
+              echo "=========================================="
+              echo "Available tags:"
+              echo "  - ${REGISTRY}/comfyui-dgx:${VERSION}-arm64"
+              echo "  - ${REGISTRY}/comfyui-dgx:latest-arm64"
+              echo ""
+              echo "To run the container:"
+              echo "  ./run-spark.sh"
+          else
+              echo ""
+              echo "=========================================="
+              echo "Build failed!"
+              echo "Exit code: $?"
+              echo "=========================================="
+              exit 1
+          fi
+
+    - name: Verify Docker is installed
+      command: docker --version
+      register: docker_version
+      changed_when: false
+
+    - name: Display Docker version
+      debug:
+        msg: "Docker version: {{ docker_version.stdout }}"
+
+    - name: Verify NVIDIA Docker runtime
+      command: docker run --rm --gpus all nvidia/cuda:12.8.1-base-ubuntu24.04 nvidia-smi
+      register: nvidia_test
+      changed_when: false
+      failed_when: false
+
+    - name: Display NVIDIA test result
+      debug:
+        msg: "NVIDIA Docker runtime is {{ 'working' if nvidia_test.rc == 0 else 'NOT working - please check nvidia-docker installation' }}"
+
+    - name: Verify mount points exist
+      stat:
+        path: "{{ item }}"
+      register: mount_check
+      loop:
+        - "{{ models_path }}"
+        - "{{ input_path }}"
+        - "{{ output_path }}"
+
+    - name: Display mount point status
+      debug:
+        msg: "{{ item.item }} - {{ 'EXISTS' if item.stat.exists else 'MISSING - please create' }}"
+      loop: "{{ mount_check.results }}"
+
+    - name: Build ComfyUI Docker image (this will take 15-25 minutes)
+      shell: |
+        cd {{ project_dir }}
+        ./build.sh
+      register: build_result
+      become_user: "{{ ansible_user }}"
+      async: 3600  # 1 hour timeout
+      poll: 30     # Check every 30 seconds
+
+    - name: Display build output
+      debug:
+        msg: "{{ build_result.stdout_lines }}"
+
+    - name: Start ComfyUI container
+      shell: |
+        cd {{ project_dir }}
+        ./run-spark.sh
+      register: run_result
+      become_user: "{{ ansible_user }}"
+
+    - name: Display container startup output
+      debug:
+        msg: "{{ run_result.stdout_lines }}"
+
+    - name: Wait for ComfyUI to be ready
+      wait_for:
+        port: "{{ port }}"
+        delay: 10
+        timeout: 120
+
+    - name: Get container logs
+      command: docker logs --tail 50 {{ container_name }}
+      register: container_logs
+      changed_when: false
+
+    - name: Display container logs
+      debug:
+        msg: "{{ container_logs.stdout_lines }}"
+
+    - name: Display success message
+      debug:
+        msg: |
+          ========================================
+          ComfyUI successfully deployed to DGX Spark!
+          ========================================
+          Access ComfyUI at: http://{{ ansible_host }}:{{ port }}
+          
+          Useful commands:
+            View logs:    docker logs -f {{ container_name }}
+            Stop:         docker stop {{ container_name }}
+            Restart:      docker restart {{ container_name }}
+            Rebuild:      cd {{ project_dir }} && ./build.sh

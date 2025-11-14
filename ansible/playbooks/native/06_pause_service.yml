@@ -1,0 +1,37 @@
+---
+- name: Pause ComfyUI service (disable auto-start)
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Stop ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        state: stopped
+
+    - name: Disable ComfyUI service from starting on boot
+      systemd:
+        name: "{{ service_name }}"
+        enabled: no
+
+    - name: Get service status
+      systemd:
+        name: "{{ service_name }}"
+      register: service_status
+
+    - name: Display service summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Service Paused!
+          ========================================
+          Service name: {{ service_name }}
+          Status: {{ service_status.status.ActiveState }}
+          Boot start: Disabled
+          
+          The service has been stopped and disabled from auto-start on boot.
+          - All files and configuration remain intact
+          - Service will NOT start automatically on reboot
+          
+          To resume the service:
+            ansible-playbook 07_start_service.yml

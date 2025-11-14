@@ -1,0 +1,65 @@
+---
+- name: Stop and remove ComfyUI service completely
+  hosts: spark_primary
+  become: yes
+  vars:
+    remove_installation: false  # Set to true to also remove {{ comfyui_install_dir }}
+
+  tasks:
+    - name: Stop ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Disable ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove systemd service file
+      file:
+        path: "/etc/systemd/system/{{ service_name }}.service"
+        state: absent
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Remove ComfyUI installation directory
+      file:
+        path: "{{ comfyui_install_dir }}"
+        state: absent
+      when: remove_installation | bool
+
+    - name: Display removal summary (service only)
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Service Removed!
+          ========================================
+          Service name: {{ service_name }}
+          Status: Service file deleted
+          
+          The systemd service has been completely removed.
+          ComfyUI installation remains at: {{ comfyui_install_dir }}
+          
+          To also remove the installation directory, run:
+            ansible-playbook 08_stop_remove_service.yml -e "remove_installation=true"
+      when: not (remove_installation | bool)
+
+    - name: Display removal summary (service and installation)
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Completely Removed!
+          ========================================
+          Service name: {{ service_name }}
+          Installation directory: {{ comfyui_install_dir }}
+          
+          Both the systemd service and installation have been completely removed.
+          
+          To reinstall ComfyUI, run:
+            ansible-playbook 01_install_update_comfyui.yml
+      when: remove_installation | bool

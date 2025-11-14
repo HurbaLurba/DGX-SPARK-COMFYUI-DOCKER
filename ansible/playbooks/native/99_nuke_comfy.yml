@@ -1,0 +1,50 @@
+---
+- name: Nuclear option - Complete ComfyUI removal
+  hosts: spark_primary
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: Stop ComfyUI service if running
+      systemd:
+        name: "{{ service_name }}"
+        state: stopped
+      ignore_errors: yes
+
+    - name: Disable ComfyUI service
+      systemd:
+        name: "{{ service_name }}"
+        enabled: no
+      ignore_errors: yes
+
+    - name: Remove systemd service file
+      file:
+        path: "/etc/systemd/system/{{ service_name }}.service"
+        state: absent
+
+    - name: Reload systemd daemon
+      systemd:
+        daemon_reload: yes
+
+    - name: Remove entire ComfyUI installation directory
+      file:
+        path: "{{ comfyui_install_dir }}"
+        state: absent
+
+    - name: Remove ComfyUI group
+      group:
+        name: "{{ comfyui_group }}"
+        state: absent
+
+    - name: Display completion message
+      debug:
+        msg: |
+          ComfyUI has been completely removed from {{ ansible_host }}
+          
+          Removed:
+          - Service: {{ service_name }}
+          - Installation directory: {{ comfyui_install_dir }}
+          - User group: {{ comfyui_group }}
+          
+          Note: NFS mount points and actual NFS storage were NOT touched.
+          Note: Users remain in the system but were removed from {{ comfyui_group }}.

@@ -1,0 +1,90 @@
+---
+- name: Install recommended ComfyUI custom nodes and plugins
+  hosts: spark_primary
+  become: yes
+
+  tasks:
+    - name: Remove existing custom_nodes directory
+      file:
+        path: "{{ comfyui_app_dir }}/custom_nodes"
+        state: absent
+
+    - name: Create fresh custom_nodes directory
+      file:
+        path: "{{ comfyui_app_dir }}/custom_nodes"
+        state: directory
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: "{{ comfyui_permissions }}"
+
+    - name: Clone all custom nodes from group_vars list (parallel with async)
+      git:
+        repo: "{{ item }}"
+        dest: "{{ comfyui_app_dir }}/custom_nodes/{{ item | basename | regex_replace('\\.git$', '') }}"
+        force: no
+        version: HEAD
+      loop: "{{ custom_nodes }}"
+      async: 300
+      poll: 0
+      register: git_clone_jobs
+      ignore_errors: yes
+
+    - name: Wait for all git clones to complete
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: git_clone_results
+      until: git_clone_results.finished
+      retries: 60
+      delay: 5
+      loop: "{{ git_clone_jobs.results }}"
+      when: "'ansible_job_id' in item"
+      ignore_errors: yes
+
+    - name: Install custom node dependencies (filtering torch/nvidia packages)
+      shell: |
+        . {{ venv_path }}/bin/activate
+        {% for key, value in comfyui_env_vars.items() %}
+        export {{ key }}={{ value }}
+        {% endfor %}
+        for node_dir in {{ comfyui_app_dir }}/custom_nodes/*/; do
+          if [ -f "$node_dir/requirements.txt" ]; then
+            echo "Installing requirements for $(basename $node_dir) (preserving PyTorch)"
+            grep -v -E "^(torch|torchvision|torchaudio|nvidia-)" "$node_dir/requirements.txt" > /tmp/filtered_requirements.txt || true
+            if [ -s /tmp/filtered_requirements.txt ]; then
+              pip install --no-cache-dir -r /tmp/filtered_requirements.txt || true
+            fi
+            rm -f /tmp/filtered_requirements.txt
+          fi
+        done
+      args:
+        executable: /bin/bash
+      environment: "{{ comfyui_env_vars }}"
+
+    - name: Install missing common dependencies
+      shell: |
+        . {{ venv_path }}/bin/activate
+        pip install --no-cache-dir soundfile diffusers pydantic-settings || true
+      args:
+        executable: /bin/bash
+      environment: "{{ comfyui_env_vars }}"
+      ignore_errors: yes
+
+    - name: Set permissions on custom nodes
+      file:
+        path: "{{ comfyui_app_dir }}/custom_nodes"
+        state: directory
+        owner: root
+        group: "{{ comfyui_group }}"
+        mode: '0775'
+        recurse: yes
+
+    - name: Display installation summary
+      debug:
+        msg: |
+          ========================================
+          ComfyUI Custom Nodes Installed!
+          ========================================
+          Custom nodes directory: {{ comfyui_app_dir }}/custom_nodes
+          
+          All custom nodes cloned and dependencies installed.
+          Restart ComfyUI to load the new custom nodes.
