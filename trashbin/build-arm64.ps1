@@ -1,9 +1,10 @@
 #!/usr/bin/env pwsh
-# Build script for ComfyUI Docker image (AMD64)
+# Build script for ComfyUI Docker image (ARM64)
+# NOTE: This should be run on an ARM64 system like the DGX Spark
 
 param(
     [string]# Configuration
-$VERSION = "0.04",
+$VERSION = "0.08",
     [string]$Registry = "local",
     [switch]$NoBuildCache
 )
@@ -11,21 +12,21 @@ $VERSION = "0.04",
 $ErrorActionPreference = "Stop"
 
 Write-Host "=========================================="
-Write-Host "Building ComfyUI Docker Image (AMD64)"
+Write-Host "Building ComfyUI Docker Image (ARM64)"
 Write-Host "Version: $Version"
 Write-Host "Registry: $Registry"
 Write-Host "=========================================="
 
 # Set build variables
 $ImageName = "$Registry/comfyui-dgx"
-$Platform = "linux/amd64"
-$DockerfilePath = ".\docker\Dockerfile.comfyui-dgx"
-$ContextPath = ".\docker"
+$Platform = "linux/arm64"
+$DockerfilePath = "./docker/Dockerfile.comfyui-dgx"
+$ContextPath = "./docker"
 
 # Build tags
 $Tags = @(
-    "${ImageName}:${Version}-amd64",
-    "${ImageName}:latest-amd64"
+    "${ImageName}:${Version}-arm64",
+    "${ImageName}:latest-arm64"
 )
 
 # Build tag arguments
@@ -70,7 +71,7 @@ if ($LASTEXITCODE -eq 0) {
     }
     Write-Host ""
     Write-Host "To run the container:"
-    Write-Host "  .\run-local.ps1"
+    Write-Host "  ./run-local-arm64.sh"
 } else {
     Write-Host ""
     Write-Host "=========================================="

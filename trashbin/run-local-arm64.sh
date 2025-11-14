@@ -3,7 +3,7 @@
 
 set -e
 
-VERSION="${VERSION:-0.04}"
+VERSION="${VERSION:-0.08}"
 REGISTRY="${REGISTRY:-local}"
 CONTAINER_NAME="${CONTAINER_NAME:-comfyui-dgx-spark}"
 PORT="${PORT:-8188}"

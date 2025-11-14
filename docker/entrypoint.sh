@@ -2,8 +2,8 @@
 set -e
 
 echo "=========================================="
-echo "ComfyUI Docker Container Starting"
-echo "Version: 0.01"
+echo "ComfyUI Container Starting"
+echo "Version: 0.15"
 echo "=========================================="
 
 # Print GPU information
@@ -47,7 +47,12 @@ EOF
 fi
 
 # Build command arguments
-ARGS="--listen 0.0.0.0"
+ARGS="--listen 0.0.0.0 --disable-xformers"
+
+# Add optimization flags from environment variable
+if [ -n "$COMFYUI_ARGS" ]; then
+    ARGS="$ARGS $COMFYUI_ARGS"
+fi
 
 # Add port
 if [ -n "$COMFYUI_PORT" ]; then

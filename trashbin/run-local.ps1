@@ -2,15 +2,15 @@
 # Run script for ComfyUI Docker container on local machine (5090)
 
 param(
-    [string]$Version = "0.04",
+    [string]$Version = "0.08",
     [string]$Registry = "local",
     [string]$ContainerName = "comfyui-dgx-local",
     [int]$Port = 8188,
-    [string]$ModelsPath = "",
-    [string]$InputPath = "",
-    [string]$OutputPath = "",
-    [string]$TempPath = "",
-    [switch]$Detach,
+    [string]$ModelsPath = "D:\share\comfy\models",
+    [string]$InputPath = "E:\temp\ComfyUI\input",
+    [string]$OutputPath = "E:\temp\ComfyUI\output",
+    [string]$TempPath = "E:\temp\ComfyUI\temp",
+    [string]$ComfyUIArgs = "--normalvram --use-sage-attention --disable-cuda-malloc --cache-classic --async-offload --dont-print-server --verbose CRITICAL --log-stdout --disable-mmap --fp16-vae --reserve-vram 2 --preview-method auto --fp8_e4m3fn-text-enc --fp8_e4m3fn-unet --disable-smart-memory",
     [string[]]$ExtraArgs = @()
 )
 
@@ -37,14 +37,8 @@ if ($ExistingContainer -eq $ContainerName) {
 # Build docker run arguments
 $DockerArgs = @(
     "run"
+    "-d"  # Always run in detached mode
 )
-
-# Add detach flag
-if ($Detach) {
-    $DockerArgs += "-d"
-} else {
-    $DockerArgs += "-it"
-}
 
 # Add container name
 $DockerArgs += "--name", $ContainerName
@@ -55,33 +49,63 @@ $DockerArgs += "--gpus", "all"
 # Add port mapping
 $DockerArgs += "-p", "${Port}:8188"
 
+# Helper function to convert Windows paths to Docker-compatible paths
+function Convert-ToDockerPath {
+    param([string]$Path)
+    if ([string]::IsNullOrEmpty($Path)) { return $Path }
+    
+    # Resolve to absolute path
+    $absPath = (Resolve-Path $Path -ErrorAction SilentlyContinue).Path
+    if (-not $absPath) { $absPath = $Path }
+    
+    # Convert backslashes to forward slashes
+    $dockerPath = $absPath -replace '\\', '/'
+    
+    # Convert drive letter format (C: -> /c)
+    if ($dockerPath -match '^([A-Za-z]):(.*)') {
+        $dockerPath = "/$($matches[1].ToLower())$($matches[2])"
+    }
+    
+    return $dockerPath
+}
+
 # Add volume mounts for custom paths
 if ($ModelsPath) {
-    Write-Host "Mounting models path: $ModelsPath"
-    $DockerArgs += "-v", "${ModelsPath}:/workspace/ComfyUI/models"
+    $dockerModelsPath = Convert-ToDockerPath $ModelsPath
+    Write-Host "Mounting models path: $ModelsPath -> $dockerModelsPath"
+    $DockerArgs += "-v", "${dockerModelsPath}:/workspace/ComfyUI/models"
     $DockerArgs += "-e", "MODEL_BASE_PATH=/workspace/ComfyUI/models"
 }
 
 if ($InputPath) {
-    Write-Host "Mounting input path: $InputPath"
-    $DockerArgs += "-v", "${InputPath}:/workspace/ComfyUI/input"
+    $dockerInputPath = Convert-ToDockerPath $InputPath
+    Write-Host "Mounting input path: $InputPath -> $dockerInputPath"
+    $DockerArgs += "-v", "${dockerInputPath}:/workspace/ComfyUI/input"
     $DockerArgs += "-e", "INPUT_DIR=/workspace/ComfyUI/input"
 }
 
 if ($OutputPath) {
-    Write-Host "Mounting output path: $OutputPath"
-    $DockerArgs += "-v", "${OutputPath}:/workspace/ComfyUI/output"
+    $dockerOutputPath = Convert-ToDockerPath $OutputPath
+    Write-Host "Mounting output path: $OutputPath -> $dockerOutputPath"
+    $DockerArgs += "-v", "${dockerOutputPath}:/workspace/ComfyUI/output"
     $DockerArgs += "-e", "OUTPUT_DIR=/workspace/ComfyUI/output"
 }
 
 if ($TempPath) {
-    Write-Host "Mounting temp path: $TempPath"
-    $DockerArgs += "-v", "${TempPath}:/workspace/ComfyUI/temp"
+    $dockerTempPath = Convert-ToDockerPath $TempPath
+    Write-Host "Mounting temp path: $TempPath -> $dockerTempPath"
+    $DockerArgs += "-v", "${dockerTempPath}:/workspace/ComfyUI/temp"
     $DockerArgs += "-e", "TEMP_DIR=/workspace/ComfyUI/temp"
 }
 
 # Add environment variables
 $DockerArgs += "-e", "COMFYUI_PORT=8188"
+
+# Add ComfyUI optimization arguments
+if ($ComfyUIArgs) {
+    Write-Host "ComfyUI arguments: $ComfyUIArgs"
+    $DockerArgs += "-e", "COMFYUI_ARGS=$ComfyUIArgs"
+}
 
 # Add restart policy
 $DockerArgs += "--restart", "unless-stopped"

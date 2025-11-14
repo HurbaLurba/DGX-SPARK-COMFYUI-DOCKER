@@ -1,9 +1,9 @@
-FROM nvcr.io/nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+FROM nvcr.io/nvidia/pytorch:25.09-py3
 
 # Metadata
 LABEL maintainer="HurbaLurba"
 LABEL description="ComfyUI optimized for DGX Spark, RTX 6000 Pro Blackwell, and RTX 5090"
-LABEL version="0.04"
+LABEL version="0.15"
 
 # Set working directory
 WORKDIR /workspace
@@ -28,64 +28,95 @@ ENV PYTHONUNBUFFERED=1 \
     NO_ALBUMENTATIONS_UPDATE=1 \
     DEBIAN_FRONTEND=noninteractive
 
-# Install Python 3.12 and system dependencies
+# Install additional system dependencies (PyTorch container already has Python 3.10+ and CUDA)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    python3.12 \
-    python3.12-dev \
-    python3-pip \
-    python3.12-venv \
     git \
     wget \
     curl \
     libgl1 \
     libglib2.0-0 \
-    ca-certificates \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Set python3.12 as default python
-RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.12 1 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.12 1
+# PyTorch with CUDA support is already installed in NVIDIA container - verify and pin it
+RUN python -c "import torch; print(f'PyTorch: {torch.__version__}'); print(f'CUDA available: {torch.cuda.is_available()}'); print(f'CUDA version: {torch.version.cuda}')" && \
+    pip freeze | grep -E "^torch==" > /tmp/pytorch_pins.txt && \
+    pip freeze | grep -E "^(torchvision|torchaudio)==" >> /tmp/pytorch_pins.txt || true
 
-# Install PyTorch 2.8 with CUDA 12.8 support (works on both ARM64 and AMD64)
-RUN pip install --break-system-packages --no-cache-dir \
-    torch==2.8.* \
-    torchvision \
-    torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+# Set CUDA_HOME for building CUDA extensions (NVIDIA container has CUDA in /usr/local/cuda)
+ENV CUDA_HOME=/usr/local/cuda
+
+# SKIP xformers - NVIDIA PyTorch container has optimized CUDA kernels built-in
+# Using --disable-xformers flag at runtime instead
 
 # Install additional Python packages needed for ComfyUI
-RUN pip install --break-system-packages --no-cache-dir \
+RUN pip install --no-cache-dir \
     python-dotenv \
     psutil \
-    onnxruntime-gpu
+    onnxruntime
 
 # Clone ComfyUI repository
 RUN git clone https://github.com/comfyanonymous/ComfyUI.git /workspace/ComfyUI
 
-# Install ComfyUI requirements (excluding torch packages since we installed them already)
+# Install ComfyUI requirements (excluding torch packages since they're already installed and pinned)
 WORKDIR /workspace/ComfyUI
 RUN grep -v -E "^(torch|torchvision|torchaudio)$" requirements.txt > /tmp/comfyui_requirements.txt && \
-    pip install --break-system-packages --no-cache-dir -r /tmp/comfyui_requirements.txt && \
-    rm /tmp/comfyui_requirements.txt
+    pip install --no-cache-dir -r /tmp/comfyui_requirements.txt && \
+    pip install --no-cache-dir -r /tmp/pytorch_pins.txt && \
+    rm /tmp/comfyui_requirements.txt /tmp/pytorch_pins.txt
 
 # Install torchao for quantization support
-RUN pip install --break-system-packages --no-cache-dir torchao
+RUN pip install --no-cache-dir torchao
 
-# Install flash-attention for optimal performance
-RUN pip install --break-system-packages --no-cache-dir flash-attn --no-build-isolation
+# Install flash-attention for optimal performance (NVIDIA PyTorch container has proper CUDA support)
+RUN pip install --no-cache-dir flash-attn --no-build-isolation || echo "flash-attn install failed, continuing..."
 
-# Install sageattention for attention optimization (set arch list for compilation)
-ENV TORCH_CUDA_ARCH_LIST="7.5 8.0 8.6 8.9 9.0 10.0"
-RUN pip install --break-system-packages --no-cache-dir sageattention --no-build-isolation || echo "sageattention install failed, continuing..."
+# Install sageattention for attention optimization (DGX Spark Blackwell architecture: compute capability 12.0)
+ENV TORCH_CUDA_ARCH_LIST="12.0"
+RUN pip install --no-cache-dir sageattention --no-build-isolation || echo "sageattention install failed, continuing..."
 
-# Clone custom nodes
+# Clone custom nodes (continue on failures for repos that might be private/missing)
 RUN mkdir -p /workspace/ComfyUI/custom_nodes && \
     cd /workspace/ComfyUI/custom_nodes && \
-    git clone https://github.com/ltdrdata/ComfyUI-Manager.git && \
-    git clone https://github.com/rgthree/rgthree-comfy.git && \
-    git clone https://github.com/city96/ComfyUI_ExtraModels.git && \
-    git clone https://github.com/city96/ComfyUI-GGUF.git
+    git clone https://github.com/ltdrdata/ComfyUI-Manager.git || true && \
+    git clone https://github.com/rgthree/rgthree-comfy.git || true && \
+    git clone https://github.com/city96/ComfyUI_ExtraModels.git || true && \
+    git clone https://github.com/city96/ComfyUI-GGUF.git || true && \
+    git clone https://github.com/chrisgoringe/cg-use-everywhere.git || true && \
+    git clone https://github.com/giriss/comfy-image-saver.git || true && \
+    git clone https://github.com/M1kep/ComfyLiterals.git || true && \
+    git clone https://github.com/Fannovel16/comfyui_controlnet_aux.git || true && \
+    git clone https://github.com/asagi4/ComfyUI-Adaptive-Guidance.git || true && \
+    git clone https://github.com/Kosinkadink/ComfyUI-Advanced-ControlNet.git || true && \
+    git clone https://github.com/chibiace/ComfyUI-Chibi-Nodes.git || true && \
+    git clone https://github.com/kijai/ComfyUI-GIMM-VFI.git || true && \
+    git clone https://github.com/Zehong-Ma/ComfyUI-MagCache.git || true && \
+    git clone https://github.com/DoctorDiffusion/ComfyUI-MediaMixer.git || true && \
+    git clone https://github.com/royceschultz/ComfyUI-Notifications.git || true && \
+    git clone https://github.com/pamparamm/ComfyUI-ppm.git || true && \
+    git clone https://github.com/yuvraj108c/ComfyUI-Upscaler-Tensorrt.git || true && \
+    git clone https://github.com/jamesWalker55/comfyui-various.git || true && \
+    git clone https://github.com/stduhpf/ComfyUI-WanMoeKSampler.git || true && \
+    git clone https://github.com/cubiq/ComfyUI_essentials.git || true && \
+    git clone https://github.com/pythongosssss/ComfyUI-Custom-Scripts.git || true && \
+    git clone https://github.com/FizzleDorf/ComfyUI-Dream-Project.git comfyui-dream-video-batches || true && \
+    git clone https://github.com/yolain/ComfyUI-Easy-Use.git || true && \
+    git clone https://github.com/kijai/ComfyUI-Florence2.git || true && \
+    git clone https://github.com/Fannovel16/ComfyUI-Frame-Interpolation.git || true && \
+    git clone https://github.com/ltdrdata/ComfyUI-Impact-Pack.git || true && \
+    git clone https://github.com/ltdrdata/ComfyUI-Impact-Subpack.git || true && \
+    git clone https://github.com/kijai/ComfyUI-KJNodes.git || true && \
+    git clone https://github.com/city96/ComfyUI-GGUF.git gguf || true && \
+    git clone https://github.com/LoraKami/comfyui-lora-manager.git || true && \
+    git clone https://github.com/city96/ComfyUI_MixerBox.git comfyui-mxtoolkit || true && \
+    git clone https://github.com/glibsonoran/Plush-for-ComfyUI.git comfyui-post-processing-nodes || true && \
+    git clone https://github.com/hirad/comfyui-reactor-node.git || true && \
+    git clone https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite.git || true && \
+    git clone https://github.com/WASasquatch/was-node-suite-comfyui.git || true && \
+    git clone https://github.com/aria1th/ComfyUI-MagicCache.git comfyui-multigpu || true && \
+    git clone https://github.com/mav-rik/facerestore_cf.git crt-nodes || true && \
+    git clone https://github.com/calcuis/gguf.git || true && \
+    git clone https://github.com/PGCRT/CRT-Nodes.git || true
 
 # Install custom node dependencies if they exist
 # Filter out torch/nvidia packages to preserve our PyTorch installation
@@ -94,11 +125,17 @@ RUN for node_dir in /workspace/ComfyUI/custom_nodes/*/; do \
             echo "Installing requirements for $(basename $node_dir) (preserving PyTorch)"; \
             grep -v -E "^(torch|torchvision|torchaudio|nvidia-)" "$node_dir/requirements.txt" > /tmp/filtered_requirements.txt || true; \
             if [ -s /tmp/filtered_requirements.txt ]; then \
-                pip install --break-system-packages --no-cache-dir -r /tmp/filtered_requirements.txt || true; \
+                pip install --no-cache-dir -r /tmp/filtered_requirements.txt || true; \
             fi; \
             rm -f /tmp/filtered_requirements.txt; \
         fi \
     done
+
+# Install missing dependencies for specific custom nodes
+RUN pip install --no-cache-dir \
+    soundfile \
+    diffusers \
+    pydantic-settings || true
 
 # Create directories for models, input, output, and temp
 RUN mkdir -p \
@@ -112,25 +149,6 @@ RUN chmod -R 777 /workspace/ComfyUI/models \
     /workspace/ComfyUI/input \
     /workspace/ComfyUI/output \
     /workspace/ComfyUI/temp
-
-# Create extra_model_paths.yaml template
-RUN echo 'comfyui:' > /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  base_path: /workspace/ComfyUI/models' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  is_default: true' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  checkpoints: checkpoints' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  clip: clip' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  clip_vision: clip_vision' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  configs: configs' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  controlnet: controlnet' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  diffusion_models: |' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '    diffusion_models' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '    unet' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  embeddings: embeddings' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  loras: loras' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  text_encoders: text_encoders' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  upscale_models: upscale_models' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  vae: vae' >> /workspace/ComfyUI/extra_model_paths.yaml.template && \
-    echo '  reactor: reactor' >> /workspace/ComfyUI/extra_model_paths.yaml.template
 
 # Expose ComfyUI port
 EXPOSE 8188
