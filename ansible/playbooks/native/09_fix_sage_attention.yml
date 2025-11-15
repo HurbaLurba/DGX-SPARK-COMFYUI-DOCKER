@@ -42,7 +42,7 @@
         
         # Set CUDA compilation environment
         export CUDA_HOME="{{ cuda_home }}"
-        export TORCH_CUDA_ARCH_LIST="{{ cuda_arch_list }}"
+        export TORCH_CUDA_ARCH_LIST="8.0;8.9;9.0;12.0"
         export PATH="{{ venv_path }}/bin:{{ cuda_home }}/bin:/usr/bin:/bin:/usr/local/bin:$PATH"
         export CC=/usr/bin/gcc
         export CXX=/usr/bin/g++
@@ -70,6 +70,10 @@
         # Install the built wheel
         echo "Step 3: Installing built wheel..."
         {{ venv_path }}/bin/pip install dist/*.whl --force-reinstall
+        
+        # Patch for sm_121 support (Blackwell GB10)
+        echo "Step 4: Patching sageattention for sm_121 support..."
+        bash {{ playbook_dir }}/scripts/patch_sageattention_sm121.sh "{{ venv_path }}/lib/python3.12/site-packages/sageattention/core.py"
         
         echo "========================================"
         echo "Verifying sageattention installation"

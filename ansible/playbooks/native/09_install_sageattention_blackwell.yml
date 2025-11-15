@@ -1,0 +1,210 @@
+---
+- name: Install SageAttention v2 with Blackwell sm_121a support
+  hosts: spark_primary
+  gather_facts: yes
+  vars:
+    venv_path: "/opt/comfyui/venv"
+    build_dir: "/tmp/sageattention_build"
+    triton_dir: "/tmp/triton"
+    
+  tasks:
+    - name: Check if sageattention already installed
+      stat:
+        path: "{{ venv_path }}/lib/python3.12/site-packages/sageattention"
+      become: yes
+      register: sageattention_check
+
+    - name: Stop ComfyUI service
+      systemd:
+        name: comfyui
+        state: stopped
+      become: yes
+
+    - name: Uninstall old packages
+      pip:
+        name:
+          - triton
+          - sageattention
+          - sageattn3
+        state: absent
+        virtualenv: "{{ venv_path }}"
+      become: yes
+      ignore_errors: yes
+      when: not sageattention_check.stat.exists
+
+    # ========================================
+    # STEP 1: Build custom Triton FIRST
+    # ========================================
+
+    - name: Remove old Triton build directory
+      file:
+        path: "{{ triton_dir }}"
+        state: absent
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Clone Triton repository
+      git:
+        repo: "https://github.com/triton-lang/triton.git"
+        dest: "{{ triton_dir }}"
+        version: 4caa0328bf8df64896dd5f6fb9df41b0eb2e750a
+        force: yes
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Update Triton submodules
+      shell: |
+        cd {{ triton_dir }}
+        git submodule update --init --recursive
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Install Triton build dependencies
+      pip:
+        name:
+          - cmake
+          - ninja
+          - pybind11
+        virtualenv: "{{ venv_path }}"
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Build and install Triton with sm_121a support
+      pip:
+        name: "{{ triton_dir }}"
+        virtualenv: "{{ venv_path }}"
+        extra_args: "--no-build-isolation -v"
+      environment:
+        TRITON_PTXAS_PATH: "/usr/local/cuda/bin/ptxas"
+        CMAKE_BUILD_PARALLEL_LEVEL: "20"
+        MAX_JOBS: "20"
+      become: yes
+      when: not sageattention_check.stat.exists
+      async: 3600
+      poll: 30
+
+    - name: Verify Triton installation
+      shell: |
+        {{ venv_path }}/bin/python -c 'import triton; print(triton.__version__)'
+      become: yes
+      register: triton_version
+      when: not sageattention_check.stat.exists
+
+    - name: Display Triton version
+      debug:
+        msg: "Triton version: {{ triton_version.stdout }}"
+      when: triton_version is defined
+
+    - name: Cleanup Triton build directory
+      file:
+        path: "{{ triton_dir }}"
+        state: absent
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    # ========================================
+    # STEP 2: Build main SageAttention v2 with sm_121a
+    # ========================================
+
+    - name: Install sageattention build dependencies
+      pip:
+        name:
+          - wheel
+          - setuptools
+        virtualenv: "{{ venv_path }}"
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Remove old sageattention build directory
+      file:
+        path: "{{ build_dir }}"
+        state: absent
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Clone SageAttention repository
+      git:
+        repo: "https://github.com/thu-ml/SageAttention.git"
+        dest: "{{ build_dir }}"
+        version: main
+        force: yes
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Checkout PR #297 commit (Blackwell support)
+      shell: |
+        cd {{ build_dir }}
+        git fetch origin pull/297/head:pr-297
+        git checkout 93b30a3b27652423508852e77de5f2afb9846b39
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Build sageattention v2 wheel with TORCH_CUDA_ARCH_LIST=12.1
+      shell: |
+        cd {{ build_dir }}
+        export CUDA_HOME=/usr/local/cuda
+        export PATH={{ venv_path }}/bin:$CUDA_HOME/bin:$PATH
+        export MAX_JOBS=20
+        export TORCH_CUDA_ARCH_LIST="12.1"
+        {{ venv_path }}/bin/python setup.py bdist_wheel
+      become: yes
+      when: not sageattention_check.stat.exists
+      async: 1800
+      poll: 10
+
+    - name: Install sageattention wheel with --no-deps (preserves custom Triton)
+      shell: |
+        cd {{ build_dir }}
+        {{ venv_path }}/bin/pip install --no-deps dist/*.whl
+      become: yes
+      when: not sageattention_check.stat.exists
+
+    - name: Verify sageattention installation
+      shell: |
+        {{ venv_path }}/bin/python -c 'from sageattention import sageattn; print("OK")'
+      become: yes
+      register: sageattention_verify
+      when: not sageattention_check.stat.exists
+
+    - name: Verify Triton version
+      shell: |
+        {{ venv_path }}/bin/python -c 'import triton; print(triton.__version__)'
+      become: yes
+      register: triton_final_check
+      when: not sageattention_check.stat.exists
+
+    - name: Display verification results
+      debug:
+        msg: 
+          - "sageattention: {{ sageattention_verify.stdout }}"
+          - "Triton: {{ triton_final_check.stdout }}"
+      when: sageattention_verify is defined
+
+    - name: Start ComfyUI service
+      systemd:
+        name: comfyui
+        state: started
+      become: yes
+
+    - name: Wait for ComfyUI
+      wait_for:
+        port: 8188
+        delay: 5
+        timeout: 60
+
+    - name: Display completion
+      debug:
+        msg: |
+          ========================================
+          DONE! SageAttention v2 + Custom Triton
+          ========================================
+          Triton: Main branch (commit 4caa0328) with sm_121a PTX support
+          SageAttention: v2.2.0 with native sm_121a CUDA kernels
+          Source: PR #297 commit 93b30a3
+          
+          Native API - no shim needed!
+          from sageattention import sageattn
+          
+          ComfyUI: http://{{ ansible_default_ipv4.address }}:8188
+          
+          Test video generation now!
