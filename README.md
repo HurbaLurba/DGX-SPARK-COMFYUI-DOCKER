@@ -16,33 +16,33 @@ Short answer: performance. The native install is 2-3x faster than containerized 
 
 This setup is tuned specifically for the Blackwell GB10 architecture with unified memory fabric (compute capability 12.1):
 
-**Precision & Attention:**
+**Precision & Attention (The Key):**
 - **FP16 precision** - Force FP16 for unet/vae/text encoder (enables SageAttention, 2x smaller than FP32)
 - **SageAttention enabled** - Fast attention for Blackwell tensor cores (requires FP16/BF16)
 - **Flash Attention** - Included by default for standard workloads
 - **No attention upcasting** - Keeps attention operations in FP16 for maximum speed
 
-**Memory Management (Critical for Unified Memory):**
-- **GPU-only mode** - Forces all models into GPU side of unified memory fabric
-- **Zero caching** - `--cache-none` eliminates RAM spillover (30-40s load → seconds)
-- **No memory mapping** - `--disable-mmap` forces direct GPU allocation
-- **Disabled CUDA malloc** - Uses PyTorch's allocator optimized for unified memory
-- **No pinned memory** - Reduces RAM overhead on unified fabric
-- **Async offload** - Non-blocking model swapping for better pipeline
+**Memory Management (Embrace the Fabric):**
+- **Default caching enabled** - Let ComfyUI use natural caching behavior
+- **Default memory mapping** - Allow mmap for model loading
+- **No pinned memory** - `--disable-pinned-memory` reduces overhead on unified fabric
+- **Let it breathe** - Unified memory works best when you don't force GPU-only mode
 
 **CUDA Tuning:**
-- **Single connection mode** - 1 CUDA connection, 1 copy connection (eliminates contention on unified fabric)
+- **Disabled CUDA/PyTorch caching** - `CUDA_CACHE_DISABLE=1`, `PYTORCH_NO_CUDA_MEMORY_CACHING=1`
+- **Managed memory force** - `CUDA_MANAGED_FORCE_DEVICE_ALLOC=1` for GPU-preferred allocation
+- **Single CUDA connection** - `CUDA_DEVICE_MAX_CONNECTIONS=1`, 4 copy connections
+- **OpenMP threads** - `OMP_NUM_THREADS=20` for parallel CPU work
 - **EAGER module loading** - Immediate kernel loading for predictable performance
-- **Minimal CUBLAS workspace** - :0:0 config to reduce overhead
 - **PyTorch 2.9.1 with CUDA 13.0** - Latest stable with Blackwell support
 
 **System-level GPU optimizations** - Locked clocks, vboost, memory tuning, I/O optimizations (see `ansible/scripts/`)
 
 **Performance Results:**
-- Model loading: **30-40s → 2-3 seconds** (10-20x faster)
-- Sampler speed: **20% faster** than default config
-- Full GPU utilization (fans spinning at load)
-- 105W power draw vs 650W for comparable discrete GPU (6x memory at 16% power)
+- Model loading: **Fast and instant** (natural caching works)
+- Sampler speed: **Significantly faster** than forced GPU-only configs
+- Power efficiency: Lower power draw with better performance
+- Unified memory fabric: Works best when you embrace RAM offload, not fight it
 
 ## Quick Start
 
@@ -93,29 +93,28 @@ Everything is controlled through `ansible/inventory/group_vars/all.yml`:
 
 **ComfyUI Flags (Optimized for Grace-Blackwell Unified Memory):**
 ```yaml
-- "--gpu-only"              # Force GPU-side allocation on unified fabric
-- "--cache-none"            # Zero caching = 10-20x faster model loads
+- "--use-sage-attention"    # Blackwell-optimized attention
 - "--fp16-unet/vae/text-enc" # FP16 precision for SageAttention
 - "--force-fp16"            # Enforce FP16 everywhere
 - "--dont-upcast-attention" # Keep attention in FP16 for speed
-- "--disable-mmap"          # Direct GPU memory allocation
-- "--disable-cuda-malloc"   # Use PyTorch allocator
-- "--async-offload"         # Non-blocking model swaps
-- "--disable-pinned-memory" # Reduce RAM overhead
-- "--use-sage-attention"    # Blackwell-optimized attention
-- "--disable-xformers"      # Incompatible with sage attention
+- "--disable-pinned-memory" # Reduce overhead on unified fabric
+# Default caching and mmap enabled - let the fabric work naturally
 ```
 
 **CUDA Environment (Tuned for Unified Memory Fabric):**
 ```yaml
-CUDA_MODULE_LOADING: "EAGER"              # Immediate kernel loading
-CUDA_DEVICE_MAX_CONNECTIONS: "1"          # Single connection mode
-CUDA_DEVICE_MAX_COPY_CONNECTIONS: "1"     # No connection contention
-CUBLAS_WORKSPACE_CONFIG: ":0:0"           # Minimal workspace overhead
+CUDA_CACHE_DISABLE: "1"                       # No CUDA kernel caching
+PYTORCH_NO_CUDA_MEMORY_CACHING: "1"           # No PyTorch memory caching
+CUDA_DEVICE_MAX_CONNECTIONS: "1"              # Single CUDA connection
+CUDA_DEVICE_MAX_COPY_CONNECTIONS: "4"         # 4 copy connections for throughput
+CUDA_MODULE_LOADING: "EAGER"                  # Immediate kernel loading
+CUDA_MANAGED_FORCE_DEVICE_ALLOC: "1"          # Prefer GPU allocation
+OMP_NUM_THREADS: "20"                         # OpenMP parallelism
+CUBLAS_WORKSPACE_CONFIG: ":0:0"               # Minimal workspace overhead
 ```
 
 **Why These Settings Matter:**
-Traditional discrete GPU optimizations (aggressive caching, pinned memory, high connection counts) actually **hurt** performance on Grace-Blackwell's unified memory architecture. This config forces everything GPU-side with zero caching overhead, resulting in 10-20x faster model loading and 20% faster inference.
+Unified memory architecture is fundamentally different from discrete GPUs. The key insight: **embrace the RAM offload, don't fight it**. Forcing everything GPU-side (--gpu-only, --cache-none) actually hurts performance because you're fighting the fabric's natural flow. Instead, use FP16 precision to enable SageAttention, disable pinned memory to reduce overhead, and let the unified memory fabric handle the rest. The result is faster model loading, faster sampling, and lower power consumption.
 
 Check the [Native Deployment Guide](ansible/playbooks/native/README.md) for all configuration options.
 
@@ -176,11 +175,19 @@ docker/                                         # WIP, not ready yet
 
 ## Notes
 
-**Unified Memory Architecture:** Grace-Blackwell's unified memory fabric is fundamentally different from discrete GPUs. Traditional optimizations like aggressive caching, reserve-vram, and high CUDA connection counts actually hurt performance. The config here is specifically tuned to force GPU-side allocation with zero caching overhead.
+**Unified Memory Architecture - The Real Discovery:** Grace-Blackwell's unified memory fabric is fundamentally different from discrete GPUs. The breakthrough: **don't force GPU-only mode**. Let the fabric naturally flow between GPU and RAM. Forcing everything GPU-side (--gpu-only, --cache-none, --disable-mmap) fights the architecture and hurts performance. Instead, use FP16 precision for SageAttention, disable pinned memory to reduce overhead, and embrace default caching/mmap behavior. The fabric knows what it's doing.
 
 **SageAttention:** Requires FP16 or BF16 precision. FP32 will fall back to slow PyTorch attention. The `--force-fp16` config enables full SageAttention acceleration on Blackwell tensor cores.
 
-**Model Loading Speed:** With `--cache-none` and direct GPU allocation, model loading went from 30-40 seconds to 2-3 seconds. This is the key optimization for Grace-Blackwell systems.
+**Model Loading Speed:** With natural caching and memory mapping enabled, model loading is instant. Fighting the fabric with --cache-none actually made it slower (30-40s). Let it breathe.
+
+**The Magic Combo:** 
+- FP16 everywhere (--force-fp16, --fp16-unet/vae/text-enc)
+- SageAttention enabled
+- Don't upcast attention (--dont-upcast-attention)
+- Disable pinned memory (--disable-pinned-memory)
+- Default caching/mmap (no --cache-none, no --disable-mmap)
+- Let unified memory manage GPU/RAM flow naturally
 
 **GPU Clock Persistence:** Clock settings don't persist across reboots due to GB10 firmware behavior. Run playbook 11 after each boot (~5 seconds) to restore max clocks and vboost.
 
